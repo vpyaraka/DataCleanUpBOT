@@ -9,90 +9,128 @@ Original file is located at
 
 import streamlit as st
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from fpdf import FPDF
 import tempfile
-import os
+import re
 
-# Function to create PDF Report
-def generate_pdf_report(dataframe, summary_text, sections):
+# ============ Helpers ============
+
+def sanitize_text(text):
+    """Keep only ASCII characters, replace others with ?"""
+    if pd.isna(text):
+        return ""
+    return re.sub(r'[^\x00-\x7F]+', '?', str(text))
+
+def sanitize_dataframe(df):
+    """Sanitize column names and all cell values"""
+    df_copy = df.copy()
+    # Clean column names
+    df_copy.columns = [re.sub(r'[^\x00-\x7F]+', '', str(c)) for c in df_copy.columns]
+    # Clean data
+    for col in df_copy.columns:
+        df_copy[col] = df_copy[col].apply(sanitize_text)
+    return df_copy
+
+
+# ============ PDF Report Generator ============
+
+def generate_pdf_report(dataframe, summary_text, plots, sections):
     pdf = FPDF()
     pdf.add_page()
-    pdf.set_font("Arial", size=12)
 
-    # Title
-    pdf.set_font("Arial", 'B', 14)
-    pdf.cell(200, 10, "📊 Data Cleansing & Insights Report", ln=True, align="C")
+    pdf.set_font("Helvetica", size=16)
+    pdf.cell(200, 10, "Data Cleansing & Insights Report", ln=True, align="C")
     pdf.ln(10)
 
-    # Narrative Summary
-    if sections.get("summary", False):
-        pdf.set_font("Arial", 'B', 12)
-        pdf.cell(200, 10, "🔎 Summary Insights", ln=True)
-        pdf.set_font("Arial", size=11)
-        for line in summary_text.split("\n"):
-            pdf.multi_cell(0, 8, line)
+    pdf.set_font("Helvetica", size=12)
+    pdf.multi_cell(0, 10, f"Summary:\n{summary_text}")
+    pdf.ln(10)
+
+    for section_title, section_content in sections.items():
+        pdf.set_font("Helvetica", size=14)
+        pdf.cell(0, 10, sanitize_text(section_title), ln=True)
+        pdf.set_font("Helvetica", size=12)
+        pdf.multi_cell(0, 10, sanitize_text(section_content))
         pdf.ln(5)
 
-    # Missing Values
-    if sections.get("missing", False):
-        pdf.set_font("Arial", 'B', 12)
-        pdf.cell(200, 10, "❌ Missing Values", ln=True)
-        missing = dataframe.isnull().sum()
-        for col, val in missing.items():
-            pdf.set_font("Arial", size=11)
-            pdf.cell(200, 8, f"{col}: {val} missing", ln=True)
-        pdf.ln(5)
+    for plot_path in plots:
+        pdf.add_page()
+        pdf.image(plot_path, x=10, y=20, w=180)
 
-    # Correlation Heatmap
-    if sections.get("correlation", False):
-        fig, ax = plt.subplots(figsize=(6,4))
-        sns.heatmap(dataframe.corr(numeric_only=True), annot=True, cmap="coolwarm", ax=ax)
-        tmpfile = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
-        plt.savefig(tmpfile.name)
-        plt.close(fig)
-        pdf.image(tmpfile.name, w=150)
-        os.unlink(tmpfile.name)
-        pdf.ln(5)
-
-    # Save PDF
     tmp_pdf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
     pdf.output(tmp_pdf.name)
     return tmp_pdf.name
 
 
-# ---------------- Streamlit UI ----------------
+# ============ Streamlit App ============
 
-st.title("🤖 Data Cleansing & Insights BOT")
+def main():
+    st.set_page_config(page_title="Data Cleansing BOT", layout="wide")
+    st.title("Data Cleansing & Insights BOT")
 
-uploaded_file = st.file_uploader("Upload CSV/Excel", type=["csv", "xlsx"])
+    uploaded_file = st.file_uploader("Upload CSV or Excel", type=["csv", "xlsx"])
 
-if uploaded_file is not None:
-    if uploaded_file.name.endswith(".csv"):
-        df = pd.read_csv(uploaded_file)
-    else:
-        df = pd.read_excel(uploaded_file)
+    if uploaded_file:
+        try:
+            if uploaded_file.name.endswith(".csv"):
+                df = pd.read_csv(uploaded_file)
+            else:
+                df = pd.read_excel(uploaded_file)
+        except Exception as e:
+            st.error(f"Error loading file: {e}")
+            return
 
-    st.write("✅ File Loaded:", df.shape)
-    st.dataframe(df.head())
+        # Sanitize dataframe for safe PDF output
+        df_clean = sanitize_dataframe(df)
 
-    # Sections to include
-    st.sidebar.header("📑 Report Sections")
-    sections = {
-        "summary": st.sidebar.checkbox("Summary", value=True),
-        "missing": st.sidebar.checkbox("Missing Values", value=True),
-        "correlation": st.sidebar.checkbox("Correlation Heatmap", value=True),
-    }
+        st.subheader("Preview of Data (Cleaned)")
+        st.dataframe(df_clean.head())
 
-    # Rule-based narrative
-    summary_text = f"""
-    The dataset has {df.shape[0]} rows and {df.shape[1]} columns.
-    The column with the most missing values is "{df.isnull().sum().idxmax()}".
-    The most correlated pair is identified in the correlation heatmap.
-    """
+        summary = []
+        summary.append(f"Total Rows: {df_clean.shape[0]}")
+        summary.append(f"Total Columns: {df_clean.shape[1]}")
+        summary.append(f"Missing Values: {df_clean.isnull().sum().sum()}")
+        summary.append(f"Duplicate Rows: {df_clean.duplicated().sum()}")
+        summary_text = "\n".join(summary)
 
-    if st.button("Generate PDF Report"):
-        pdf_path = generate_pdf_report(df, summary_text, sections)
+        sections = {
+            "Dataset Shape": str(df_clean.shape),
+            "Columns": ", ".join(df_clean.columns),
+            "Missing Values": str(df_clean.isnull().sum().to_dict()),
+            "Data Types": str(df_clean.dtypes.to_dict())
+        }
+
+        plots = []
+        if not df_clean.select_dtypes(include=np.number).empty:
+            plt.figure(figsize=(6, 4))
+            sns.heatmap(df_clean.corr(numeric_only=True), annot=True, cmap="coolwarm")
+            tmpfile = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+            plt.savefig(tmpfile.name)
+            plots.append(tmpfile.name)
+            plt.close()
+
+        pdf_path = generate_pdf_report(df_clean, summary_text, plots, sections)
+
+        # Download buttons
+        st.download_button("Download Cleaned CSV",
+                           df_clean.to_csv(index=False).encode("utf-8"),
+                           file_name="cleaned_data.csv",
+                           mime="text/csv")
+
+        excel_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
+        df_clean.to_excel(excel_tmp.name, index=False, engine="xlsxwriter")
+        with open(excel_tmp.name, "rb") as f:
+            st.download_button("Download Cleaned Excel", f,
+                               file_name="cleaned_data.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
         with open(pdf_path, "rb") as f:
-            st.download_button("📥 Download PDF Report", f, file_name="data_insights_report.pdf")
+            st.download_button("Download PDF Report", f,
+                               file_name="data_report.pdf", mime="application/pdf")
+
+
+if __name__ == "__main__":
+    main()
