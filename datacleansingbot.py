@@ -8,12 +8,11 @@ Original file is located at
 """
 
 # streamlit_data_cleansing_bot.py
-# Streamlit BOT: Upload CSV/Excel, Clean Data, Generate Rule‑Based Narrative Insights with Charts,
-# and export Cleaned CSV/XLSX + a configurable PDF report.
+# Fixed version — removed `datetime_is_numeric` and made code robust & executable.
 #
-# How to run:
-#   pip install streamlit pandas numpy matplotlib seaborn fpdf xlsxwriter
-#   streamlit run streamlit_data_cleansing_bot.py
+# Usage:
+#  pip install streamlit pandas numpy matplotlib seaborn fpdf xlsxwriter
+#  streamlit run streamlit_data_cleansing_bot.py
 
 import streamlit as st
 import pandas as pd
@@ -24,6 +23,7 @@ import tempfile
 import matplotlib.pyplot as plt
 import seaborn as sns
 from fpdf import FPDF
+from typing import Optional, List
 
 st.set_page_config(page_title="Data Cleansing & Insights BOT", layout="wide")
 st.title("🤖 Data Cleansing & Insights BOT")
@@ -59,13 +59,16 @@ include_num_dists = st.sidebar.checkbox("Numeric distributions", value=True)
 # File Upload
 # ============================
 uploaded_file = st.file_uploader("Upload CSV or Excel file", type=["csv", "xlsx"])
-
 if uploaded_file:
     # Read file
-    if uploaded_file.name.lower().endswith(".csv"):
-        df = pd.read_csv(uploaded_file)
-    else:
-        df = pd.read_excel(uploaded_file)
+    try:
+        if uploaded_file.name.lower().endswith(".csv"):
+            df = pd.read_csv(uploaded_file)
+        else:
+            df = pd.read_excel(uploaded_file)
+    except Exception as e:
+        st.error(f"Failed to read file: {e}")
+        st.stop()
 
     st.subheader("📂 Raw Data Preview")
     st.dataframe(df.head())
@@ -76,24 +79,25 @@ if uploaded_file:
     st.subheader("🧹 Data Cleansing")
 
     # 1) Standardize column names
-    df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
+    df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
 
     # 2) Remove duplicates
-    dupes_before = df.duplicated().sum()
+    dupes_before = int(df.duplicated().sum())
     df = df.drop_duplicates()
 
     # 3) Replace common missing markers with NaN
     df = df.replace(["?", "", "NA", "na", "N/A", "n/a", "None", "none"], np.nan)
 
-    # 4) Fix dtypes where numbers are stored as strings
+    # 4) Try safe numeric coercion for object columns that look numeric
     for col in df.columns:
         if df[col].dtype == object:
-            # try numeric conversion gracefully
-            coerced = pd.to_numeric(df[col], errors="ignore")
-            df[col] = coerced
+            coerced = pd.to_numeric(df[col], errors="coerce")
+            # if coercion succeeded for a majority, keep it
+            non_null_count = coerced.notnull().sum()
+            if non_null_count >= 0.6 * len(df):  # threshold: 60%
+                df[col] = coerced
 
     # 5) Handle missing values
-    # Numeric
     num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     cat_cols = df.select_dtypes(exclude=[np.number]).columns.tolist()
 
@@ -107,9 +111,9 @@ if uploaded_file:
         for c in num_cols:
             df[c] = df[c].fillna(0)
     elif missing_numeric_strategy == "Drop rows":
-        df = df.dropna(subset=num_cols)
+        if num_cols:
+            df = df.dropna(subset=num_cols)
 
-    # Categorical
     if missing_categorical_strategy == "Mode":
         for c in cat_cols:
             if df[c].isnull().sum() > 0:
@@ -121,7 +125,8 @@ if uploaded_file:
         for c in cat_cols:
             df[c] = df[c].fillna("<missing>")
     elif missing_categorical_strategy == "Drop rows":
-        df = df.dropna(subset=cat_cols)
+        if cat_cols:
+            df = df.dropna(subset=cat_cols)
 
     st.success(
         f"Data cleaned ✅ | Duplicates removed: {dupes_before} | Rows: {df.shape[0]} | Cols: {df.shape[1]}"
@@ -132,8 +137,9 @@ if uploaded_file:
     # ============================
     st.subheader("📊 Useful Insights")
 
+    # Describe (note: removed datetime_is_numeric kwarg for compatibility)
+    describe_df = df.describe(include="all")
     st.write("### 🔍 Summary Statistics (table)")
-    describe_df = df.describe(include="all", datetime_is_numeric=True)
     st.dataframe(describe_df)
 
     st.write("### ❓ Missing Values per Column")
@@ -143,7 +149,7 @@ if uploaded_file:
     # Correlation Heatmap
     st.write("### 📈 Correlation Heatmap")
     corr = df.corr(numeric_only=True)
-    heatmap_path = None
+    heatmap_path: Optional[str] = None
     if not corr.empty:
         fig, ax = plt.subplots(figsize=(8, 6))
         sns.heatmap(corr, annot=True, fmt=".2f", cmap="coolwarm", ax=ax)
@@ -151,12 +157,13 @@ if uploaded_file:
         tmp_heatmap = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
         fig.savefig(tmp_heatmap.name, bbox_inches="tight")
         heatmap_path = tmp_heatmap.name
+        plt.close(fig)
     else:
         st.info("No numeric columns available for correlation analysis.")
 
     # Categorical Distributions (Top 10)
     st.write("### 🏷️ Top Categorical Distributions")
-    cat_plots = []
+    cat_plots: List[str] = []
     for col in cat_cols:
         st.write(f"**{col}**")
         st.write(df[col].value_counts().head(10))
@@ -170,10 +177,11 @@ if uploaded_file:
         tmp_img = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
         fig.savefig(tmp_img.name, bbox_inches="tight")
         cat_plots.append(tmp_img.name)
+        plt.close(fig)
 
     # Numeric Distributions
     st.write("### 📊 Numeric Distributions")
-    num_plots = []
+    num_plots: List[str] = []
     for col in num_cols:
         fig, ax = plt.subplots()
         sns.histplot(df[col], kde=True, ax=ax)
@@ -183,70 +191,66 @@ if uploaded_file:
         tmp_img = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
         fig.savefig(tmp_img.name, bbox_inches="tight")
         num_plots.append(tmp_img.name)
+        plt.close(fig)
 
     # ============================
-    # Rule‑Based Narrative Summary
+    # Rule-Based Narrative Summary
     # ============================
-    def rule_based_summary(df: pd.DataFrame, corr_df: pd.DataFrame) -> str:
-        lines = []
+    def rule_based_summary(dataframe: pd.DataFrame, corr_df: pd.DataFrame) -> str:
+        lines: List[str] = []
         # Size
         lines.append(
-            f"The dataset contains {df.shape[0]:,} rows and {df.shape[1]:,} columns."
+            f"The dataset contains {dataframe.shape[0]:,} rows and {dataframe.shape[1]:,} columns."
         )
         # Missing
-        miss = df.isnull().sum().sort_values(ascending=False)
+        miss = dataframe.isnull().sum().sort_values(ascending=False)
         if (miss > 0).any():
             top_missing = miss[miss > 0].head(5)
             parts = [f"{idx} ({val})" for idx, val in top_missing.items()]
-            lines.append(
-                "Missing values are present, concentrated in: " + ", ".join(parts) + "."
-            )
+            lines.append("Missing values are present, concentrated in: " + ", ".join(parts) + ".")
         else:
             lines.append("No missing values detected after cleaning.")
-        # Categorical
-        cat_cols_local = df.select_dtypes(exclude=[np.number]).columns.tolist()
+
+        # Categorical top categories
+        cat_cols_local = dataframe.select_dtypes(exclude=[np.number]).columns.tolist()
         if cat_cols_local:
             for c in cat_cols_local[:3]:
-                vc = df[c].value_counts(dropna=False)
+                vc = dataframe[c].value_counts(dropna=False)
                 if not vc.empty:
                     top_label = vc.index[0]
-                    top_pct = (vc.iloc[0] / len(df)) * 100
-                    lines.append(
-                        f"Column '{c}' is dominated by '{top_label}' (~{top_pct:.1f}%)."
-                    )
-        # Numeric
-        num_cols_local = df.select_dtypes(include=[np.number]).columns.tolist()
+                    top_pct = (vc.iloc[0] / len(dataframe)) * 100
+                    lines.append(f"Column '{c}' is dominated by '{top_label}' (~{top_pct:.1f}%).")
+
+        # Numeric quick stats
+        num_cols_local = dataframe.select_dtypes(include=[np.number]).columns.tolist()
         for c in num_cols_local[:3]:
-            series = df[c].dropna()
+            series = dataframe[c].dropna()
             if len(series) > 0:
                 lines.append(
                     f"'{c}' ranges {series.min():.2f}–{series.max():.2f}, median {series.median():.2f}."
                 )
-        # Correlations
+
+        # Correlations: compute top pairs
         if corr_df is not None and not corr_df.empty:
-            # get top absolute correlations excluding self
-            corr_unstack = (
-                corr_df.where(~np.eye(len(corr_df), dtype=bool)).abs().unstack()
-            )
-            corr_unstack = corr_unstack.dropna().sort_values(ascending=False)
-            seen = set()
-            top_pairs = []
-            for (a, b), val in corr_unstack.items():
-                key = tuple(sorted([a, b]))
-                if a == b or key in seen:
-                    continue
-                seen.add(key)
-                top_pairs.append((a, b, val))
-                if len(top_pairs) >= 3:
-                    break
+            pairs = []
+            cols = list(corr_df.columns)
+            for i in range(len(cols)):
+                for j in range(i + 1, len(cols)):
+                    a = cols[i]
+                    b = cols[j]
+                    val = corr_df.at[a, b]
+                    pairs.append((a, b, abs(val)))
+            pairs_sorted = sorted(pairs, key=lambda x: x[2], reverse=True)
+            top_pairs = pairs_sorted[:3]
             if top_pairs:
                 parts = [f"{a} ↔ {b} ({v:.2f})" for a, b, v in top_pairs]
                 lines.append("Top correlations: " + ", ".join(parts) + ".")
-        return " " .join(lines)
+
+        return " ".join(lines)
 
     narrative_text = rule_based_summary(df, corr)
 
-    st.subheader("🧠 Narrative Summary (Rule‑based)")
+    st.subheader("🧠 Narrative Summary (Rule-based)")
     st.write(narrative_text)
 
     # ============================
@@ -272,13 +276,13 @@ if uploaded_file:
     st.subheader("📑 Generate PDF Report")
 
     def generate_pdf_report(
-        df: pd.DataFrame,
-        describe_df: pd.DataFrame,
-        missing_series: pd.Series,
+        dataframe: pd.DataFrame,
+        describe_df_local: pd.DataFrame,
+        missing_series_local: pd.Series,
         narrative: str,
-        heatmap_path: str | None,
-        cat_plots: list[str],
-        num_plots: list[str],
+        heatmap_path_local: Optional[str],
+        cat_plots_local: List[str],
+        num_plots_local: List[str],
         sections: dict,
     ) -> str:
         pdf = FPDF()
@@ -290,7 +294,7 @@ if uploaded_file:
         pdf.cell(0, 10, "Data Cleansing & Insights Report", ln=True, align="C")
         pdf.ln(4)
         pdf.set_font("Arial", size=12)
-        pdf.cell(0, 8, f"Rows: {df.shape[0]:,} | Columns: {df.shape[1]:,}", ln=True, align="C")
+        pdf.cell(0, 8, f"Rows: {dataframe.shape[0]:,} | Columns: {dataframe.shape[1]:,}", ln=True, align="C")
 
         # Narrative Summary
         if sections.get("summary") and narrative:
@@ -298,61 +302,61 @@ if uploaded_file:
             pdf.set_font("Arial", "B", 14)
             pdf.cell(0, 8, "Narrative Summary", ln=True)
             pdf.set_font("Arial", size=12)
-            # Split narrative into manageable lines
-            for para in narrative.split(". "):
-                pdf.multi_cell(0, 7, para.strip())
-                pdf.ln(1)
+            pdf.multi_cell(0, 7, narrative)
 
-        # Missing Table (first 40 rows)
+        # Missing Table
         if sections.get("missing_table"):
             pdf.add_page()
             pdf.set_font("Arial", "B", 14)
             pdf.cell(0, 8, "Missing Values per Column", ln=True)
             pdf.set_font("Arial", size=11)
-            for idx, val in missing_series.items():
+            for idx, val in missing_series_local.items():
                 pdf.cell(0, 6, f"{idx}: {int(val)}", ln=True)
 
         # Describe Table (trimmed)
         if sections.get("describe_table"):
             pdf.add_page()
             pdf.set_font("Arial", "B", 14)
-            pdf.cell(0, 8, "Summary Statistics", ln=True)
+            pdf.cell(0, 8, "Summary Statistics (trimmed)", ln=True)
             pdf.set_font("Arial", size=9)
-            # Render a subset for readability
-            trimmed = describe_df.copy()
-            trimmed = trimmed.fillna("")
-            # Convert to rows of strings
-            rows = [
-                ["stat"] + [str(c) for c in trimmed.columns.tolist()]
-            ]
+            trimmed = describe_df_local.fillna("")
+            rows = [["stat"] + [str(c) for c in trimmed.columns.tolist()]]
             for idx, row in trimmed.iterrows():
                 rows.append([str(idx)] + [str(x) for x in row.tolist()])
-            # Print as text table (simple)
             for r in rows[:40]:
                 pdf.multi_cell(0, 5, " | ".join(r))
 
         # Heatmap
-        if sections.get("heatmap") and heatmap_path:
-            pdf.add_page()
-            pdf.set_font("Arial", "B", 14)
-            pdf.cell(0, 8, "Correlation Heatmap", ln=True)
-            pdf.image(heatmap_path, w=190)
+        if sections.get("heatmap") and heatmap_path_local:
+            try:
+                pdf.add_page()
+                pdf.set_font("Arial", "B", 14)
+                pdf.cell(0, 8, "Correlation Heatmap", ln=True)
+                pdf.image(heatmap_path_local, w=180)
+            except Exception:
+                pass
 
         # Categorical plots
-        if sections.get("cat_dists") and cat_plots:
-            for img in cat_plots:
-                pdf.add_page()
-                pdf.set_font("Arial", "B", 14)
-                pdf.cell(0, 8, "Categorical Distribution", ln=True)
-                pdf.image(img, w=190)
+        if sections.get("cat_dists") and cat_plots_local:
+            for img in cat_plots_local:
+                try:
+                    pdf.add_page()
+                    pdf.set_font("Arial", "B", 14)
+                    pdf.cell(0, 8, "Categorical Distribution", ln=True)
+                    pdf.image(img, w=180)
+                except Exception:
+                    pass
 
         # Numeric plots
-        if sections.get("num_dists") and num_plots:
-            for img in num_plots:
-                pdf.add_page()
-                pdf.set_font("Arial", "B", 14)
-                pdf.cell(0, 8, "Numeric Distribution", ln=True)
-                pdf.image(img, w=190)
+        if sections.get("num_dists") and num_plots_local:
+            for img in num_plots_local:
+                try:
+                    pdf.add_page()
+                    pdf.set_font("Arial", "B", 14)
+                    pdf.cell(0, 8, "Numeric Distribution", ln=True)
+                    pdf.image(img, w=180)
+                except Exception:
+                    pass
 
         tmp_pdf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
         pdf.output(tmp_pdf.name)
@@ -369,13 +373,13 @@ if uploaded_file:
 
     if st.button("Generate PDF Report"):
         pdf_path = generate_pdf_report(
-            df=df,
-            describe_df=describe_df,
-            missing_series=missing_series,
+            dataframe=df,
+            describe_df_local=describe_df,
+            missing_series_local=missing_series,
             narrative=narrative_text,
-            heatmap_path=heatmap_path,
-            cat_plots=cat_plots,
-            num_plots=num_plots,
+            heatmap_path_local=heatmap_path,
+            cat_plots_local=cat_plots,
+            num_plots_local=num_plots,
             sections=sections,
         )
         with open(pdf_path, "rb") as f:
