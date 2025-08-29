@@ -14,59 +14,47 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from fpdf import FPDF
 import tempfile
-import re
+import os
 
-# ============ Helpers ============
-
-def sanitize_text(text):
-    """Keep only ASCII characters, replace others with ?"""
-    if pd.isna(text):
-        return ""
-    return re.sub(r'[^\x00-\x7F]+', '?', str(text))
-
-def sanitize_dataframe(df):
-    """Sanitize column names and all cell values"""
-    df_copy = df.copy()
-    # Clean column names
-    df_copy.columns = [re.sub(r'[^\x00-\x7F]+', '', str(c)) for c in df_copy.columns]
-    # Clean data
-    for col in df_copy.columns:
-        df_copy[col] = df_copy[col].apply(sanitize_text)
-    return df_copy
-
-
-# ============ PDF Report Generator ============
-
+# =========================
+# PDF Report Generator
+# =========================
 def generate_pdf_report(dataframe, summary_text, plots, sections):
     pdf = FPDF()
     pdf.add_page()
 
+    # Use built-in Helvetica (ASCII only)
     pdf.set_font("Helvetica", size=16)
     pdf.cell(200, 10, "Data Cleansing & Insights Report", ln=True, align="C")
     pdf.ln(10)
 
+    # Summary
     pdf.set_font("Helvetica", size=12)
     pdf.multi_cell(0, 10, f"Summary:\n{summary_text}")
     pdf.ln(10)
 
+    # Sections
     for section_title, section_content in sections.items():
         pdf.set_font("Helvetica", size=14)
-        pdf.cell(0, 10, sanitize_text(section_title), ln=True)
+        pdf.cell(0, 10, section_title, ln=True)
         pdf.set_font("Helvetica", size=12)
-        pdf.multi_cell(0, 10, sanitize_text(section_content))
+        pdf.multi_cell(0, 10, section_content)
         pdf.ln(5)
 
+    # Add plots
     for plot_path in plots:
         pdf.add_page()
         pdf.image(plot_path, x=10, y=20, w=180)
 
+    # Save PDF to temp file
     tmp_pdf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
     pdf.output(tmp_pdf.name)
     return tmp_pdf.name
 
 
-# ============ Streamlit App ============
-
+# =========================
+# Streamlit App
+# =========================
 def main():
     st.set_page_config(page_title="Data Cleansing BOT", layout="wide")
     st.title("Data Cleansing & Insights BOT")
@@ -74,6 +62,7 @@ def main():
     uploaded_file = st.file_uploader("Upload CSV or Excel", type=["csv", "xlsx"])
 
     if uploaded_file:
+        # Load data
         try:
             if uploaded_file.name.endswith(".csv"):
                 df = pd.read_csv(uploaded_file)
@@ -83,53 +72,45 @@ def main():
             st.error(f"Error loading file: {e}")
             return
 
-        # Sanitize dataframe for safe PDF output
-        df_clean = sanitize_dataframe(df)
+        st.subheader("Preview of Data")
+        st.dataframe(df.head())
 
-        st.subheader("Preview of Data (Cleaned)")
-        st.dataframe(df_clean.head())
-
+        # Basic Summary
         summary = []
-        summary.append(f"Total Rows: {df_clean.shape[0]}")
-        summary.append(f"Total Columns: {df_clean.shape[1]}")
-        summary.append(f"Missing Values: {df_clean.isnull().sum().sum()}")
-        summary.append(f"Duplicate Rows: {df_clean.duplicated().sum()}")
+        summary.append(f"Total Rows: {df.shape[0]}")
+        summary.append(f"Total Columns: {df.shape[1]}")
+        summary.append(f"Missing Values: {df.isnull().sum().sum()}")
+        summary.append(f"Duplicate Rows: {df.duplicated().sum()}")
         summary_text = "\n".join(summary)
 
+        # Sections
         sections = {
-            "Dataset Shape": str(df_clean.shape),
-            "Columns": ", ".join(df_clean.columns),
-            "Missing Values": str(df_clean.isnull().sum().to_dict()),
-            "Data Types": str(df_clean.dtypes.to_dict())
+            "Dataset Shape": str(df.shape),
+            "Columns": ", ".join(df.columns),
+            "Missing Values": str(df.isnull().sum().to_dict()),
+            "Data Types": str(df.dtypes.to_dict())
         }
 
+        # Plots
         plots = []
-        if not df_clean.select_dtypes(include=np.number).empty:
+        if not df.select_dtypes(include=np.number).empty:
             plt.figure(figsize=(6, 4))
-            sns.heatmap(df_clean.corr(numeric_only=True), annot=True, cmap="coolwarm")
+            sns.heatmap(df.corr(numeric_only=True), annot=True, cmap="coolwarm")
             tmpfile = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
             plt.savefig(tmpfile.name)
             plots.append(tmpfile.name)
             plt.close()
 
-        pdf_path = generate_pdf_report(df_clean, summary_text, plots, sections)
+        # Generate PDF
+        pdf_path = generate_pdf_report(df, summary_text, plots, sections)
 
         # Download buttons
-        st.download_button("Download Cleaned CSV",
-                           df_clean.to_csv(index=False).encode("utf-8"),
-                           file_name="cleaned_data.csv",
-                           mime="text/csv")
-
-        excel_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
-        df_clean.to_excel(excel_tmp.name, index=False, engine="xlsxwriter")
-        with open(excel_tmp.name, "rb") as f:
-            st.download_button("Download Cleaned Excel", f,
-                               file_name="cleaned_data.xlsx",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
+        st.download_button("Download Cleaned CSV", df.to_csv(index=False).encode("utf-8"),
+                           file_name="cleaned_data.csv", mime="text/csv")
+        st.download_button("Download Cleaned Excel", df.to_excel("cleaned_data.xlsx", index=False, engine="xlsxwriter"),
+                           file_name="cleaned_data.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         with open(pdf_path, "rb") as f:
-            st.download_button("Download PDF Report", f,
-                               file_name="data_report.pdf", mime="application/pdf")
+            st.download_button("Download PDF Report", f, file_name="data_report.pdf", mime="application/pdf")
 
 
 if __name__ == "__main__":
