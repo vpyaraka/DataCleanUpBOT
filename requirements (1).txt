@@ -1,2 +1,7 @@
 streamlit
-openai==0.28
+pandas
+numpy
+matplotlib
+seaborn
+fpdf
+xlsxwriter
